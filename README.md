@@ -256,7 +256,337 @@ Key Findings:
 
 - Timesheets.BulkApprove.Confirmed has the lowest odds ratio (0.59), which is counterintuitive, organisations that bulk-approved timesheets were actually less likely to convert, possibly because they completed the trial workflow without feeling the need to pay for continued access.
 
+---
+1.5 Engagement Segmentation
 
+Organisations were segmented by number of distinct activities used during the trial:
+
+*![engagement Seg](https://github.com/Uzo-Hill/Trial-Activation-Conversion-Analysis/blob/main/project_image/level_trial_engagement.png)*
+
+- Conversion rates are narrow across all segments (19–25%), suggesting that feature breadth alone does not strongly drive conversion decisions.
+- Power users (organizations with 8+ activities) shows the highest conversion rate **(~25%)**, suggesting strong product interaction drives value realization.
+- Low engagement still converts **(~20%)**, implying that some organisations may convert with minimal usage.
+
+---
+1.6 Trial Goal Definition
+
+Based on the conversion driver analysis, five trial goals were defined representing the platform's core value pillars. Goals were selected using three signals: statistical association, odds ratio strength, and product-value workflow logic.
+
+| Goal          | Definition                          | Completion Rate   |
+| --------------- | ------------------------------------ |----------------|
+| goal_scheduling_core | Created ≥ 3 shifts    | 58% |
+| goal_schedule_viewed   | Viewed schedule on mobile ≥ 1 time | 47% |
+| goal_punchclock_used       | Clocked in or out at least once| 22% |
+| goal_timesheet_approved       | Approved ≥ 1 shift or bulk timesheet| 21% |
+| goal_team_comms    | Sent ≥ 1 team communication | 15% |
+
+
+*![goal completion](https://github.com/Uzo-Hill/Trial-Activation-Conversion-Analysis/blob/main/project_image/orgs_completed_trial_goal.png)*
+
+Key Findings:
+
+- Completion rates are nearly identical between converters and non-converters across all five goals, reinforcing the earlier finding that no single activity or goal is a strong standalone predictor of conversion
+
+
+- Scheduling Core and Schedule Viewed are the most completed goals, **58%** and **47%** of all organisations respectively, confirming that shift creation and mobile schedule viewing are the most natural entry points into the platform.
+
+- Team Communication is the least completed goal **(15%)** and is actually slightly higher among non-converters **(16%)** than converters **(12%)**, suggesting that sending messages during the trial does not drive conversion and may not belong in the activation definition without further validation
+
+---
+1.7 Trial Activation Results
+
+An organisation achieves Trial Activation when it completes all 5 goals
+
+*![Activation milestone](https://github.com/Uzo-Hill/Trial-Activation-Conversion-Analysis/blob/main/project_image/activation_milestone.png)*
+
+- Fully Activated organisations have the lowest conversion rate (16%). Surprisingly, completing all 5 goals does not lead to the highest conversion, suggesting the current activation definition may not be well-calibrated to predict conversion
+
+- Partially activated organisations (≥3 goals) have the highest conversion rate (27%) — indicating that a 3-goal threshold may be a more meaningful activation benchmark than requiring all 5 goals
+
+- Even organisations with no activation convert at 25% — this challenges the entire activation framework and suggests that conversion at Splendor Analytics may be driven by factors outside of in-app behaviour, such as sales outreach, pricing, or organisational decision-making timelines.
+
+---
+
+## Task 2 : SQL Data Models
+
+The SQL models follow a three-layer data warehouse architecture:
+```
+┌──────────────────────────────────────────────────────────┐
+│  STAGING LAYER                                           │
+│  stg_trial_events  (102,895 rows)                        │
+│  Raw cleaned event stream — one row per event            │
+└───────────────────────┬──────────────────────────────────┘
+                        │
+┌───────────────────────▼──────────────────────────────────┐
+│  INTERMEDIATE LAYER                                      │
+│  int_org_activity_summary  (966 rows)                    │
+│  Pivoted activity counts — one row per organisation      │
+└───────────┬──────────────────────────────┬───────────────┘
+            │                              │
+┌───────────▼────────────┐   ┌────────────▼───────────────┐
+│  MARTS LAYER           │   │  MARTS LAYER               │
+│  mart_trial_goals      │   │  mart_trial_activation     │
+│  (966 rows)            │   │  (966 rows)                │
+│  5 goal flags per org  │   │  Activation flag + tier    │
+└────────────────────────┘   └────────────────────────────┘
+```
+---
+The SQL models were built using **mysql-connector-python** rather than MySQL Workbench's import wizard, because the large dataset (102,895 rows) consistently failed or imported partially through the wizard. Python batch insertion was used instead:
+
+```python
+import mysql.connector
+
+conn = mysql.connector.connect(
+    host="localhost", user="root",
+    password="***", database="splendor_analytics"
+)
+cursor = conn.cursor()
+
+# Insert all rows in batches of 5,000
+for i in range(0, len(rows), 5000):
+    cursor.executemany(insert_query, rows[i:i+5000])
+    conn.commit()
+    print(f"Inserted rows {i+1} to {min(i+5000, len(rows))}")
+```
+
+- Staging Table — stg_trial_events
+
+One row per event. Stores the cleaned dataset exactly as produced from Task 1.
+
+```sql
+CREATE TABLE stg_trial_events (
+    organization_id    VARCHAR(50),
+    activity_name      VARCHAR(100),
+    timestamp          VARCHAR(25),
+    converted          INT,           -- 0 or 1
+    converted_at       VARCHAR(25),   -- NULL for non-converted orgs
+    trial_start        VARCHAR(25),
+    trial_end          VARCHAR(25),
+    days_from_start    INT,
+    trial_length       INT,
+    before_conversion  INT,
+    activity_canonical VARCHAR(100),
+    activity_category  VARCHAR(50)
+);
+```
+
+- Intermediate View — int_org_activity_summary
+
+Collapses 102,895 event rows into 966 org-level rows by pivoting activity counts using SUM(activity_name = '...'):
+
+```sql
+CREATE VIEW int_org_activity_summary AS
+SELECT
+    organization_id,
+    MAX(converted)                                          AS converted,
+    COUNT(*)                                                AS total_events,
+    COUNT(DISTINCT activity_name)                           AS distinct_activities,
+    COUNT(DISTINCT DATE(timestamp))                         AS active_days,
+    SUM(activity_name = 'Scheduling.Shift.Created')         AS cnt_shift_created,
+    SUM(activity_name = 'Mobile.Schedule.Loaded')           AS cnt_schedule_loaded,
+    SUM(activity_name = 'PunchClock.PunchedIn')             AS cnt_punched_in,
+    -- ... all 28 activities
+FROM stg_trial_events
+GROUP BY organization_id;
+```
+
+- Mart Table 1 : mart_trial_goals
+Grain: One row per organisation
+
+Purpose: Tracks whether each trialist has completed each of the five trial goals
+
+```python
+cursor.execute("DROP TABLE IF EXISTS mart_trial_goals")
+cursor.execute("""
+    CREATE TABLE mart_trial_goals AS
+    SELECT
+        organization_id,
+        converted,
+        trial_start,
+        trial_end,
+        CASE WHEN cnt_shift_created >= 3
+             THEN 1 ELSE 0 END                  AS goal_scheduling_core,
+        CASE WHEN cnt_schedule_loaded >= 1
+             THEN 1 ELSE 0 END                  AS goal_schedule_viewed,
+        CASE WHEN (cnt_punched_in +
+                   cnt_punched_out) >= 1
+             THEN 1 ELSE 0 END                  AS goal_punchclock_used,
+        CASE WHEN (cnt_shift_approved +
+                   cnt_timesheet_bulk_approved) >= 1
+             THEN 1 ELSE 0 END                  AS goal_timesheet_approved,
+        CASE WHEN cnt_message_created >= 1
+             THEN 1 ELSE 0 END                  AS goal_team_comms,
+        cnt_shift_created,
+        cnt_schedule_loaded,
+        cnt_punched_in,
+        cnt_punched_out,
+        cnt_shift_approved,
+        cnt_timesheet_bulk_approved,
+        cnt_message_created,
+        total_events,
+        distinct_activities,
+        active_days
+    FROM int_org_activity_summary
+""")
+conn.commit()
+
+cursor.execute("SELECT COUNT(*) FROM mart_trial_goals")
+```
+- Mart Table 2 : mart_trial_activation
+
+```
+cursor.execute("DROP TABLE IF EXISTS mart_trial_activation")
+cursor.execute("""
+    CREATE TABLE mart_trial_activation AS
+    SELECT
+        organization_id,
+        converted,
+        trial_start,
+        trial_end,
+        goal_scheduling_core,
+        goal_schedule_viewed,
+        goal_punchclock_used,
+        goal_timesheet_approved,
+        goal_team_comms,
+        (goal_scheduling_core    +
+         goal_schedule_viewed    +
+         goal_punchclock_used    +
+         goal_timesheet_approved +
+         goal_team_comms)                        AS goals_completed,
+        CASE WHEN (goal_scheduling_core    +
+                   goal_schedule_viewed    +
+                   goal_punchclock_used    +
+                   goal_timesheet_approved +
+                   goal_team_comms) = 5
+             THEN 1 ELSE 0 END                   AS is_activated,
+        CASE
+            WHEN (goal_scheduling_core    +
+                  goal_schedule_viewed    +
+                  goal_punchclock_used    +
+                  goal_timesheet_approved +
+                  goal_team_comms) = 5    THEN 'Fully Activated'
+            WHEN (goal_scheduling_core    +
+                  goal_schedule_viewed    +
+                  goal_punchclock_used    +
+                  goal_timesheet_approved +
+                  goal_team_comms) >= 3   THEN 'Partially Activated (>=3 goals)'
+            WHEN (goal_scheduling_core    +
+                  goal_schedule_viewed    +
+                  goal_punchclock_used    +
+                  goal_timesheet_approved +
+                  goal_team_comms) >= 1   THEN 'Early Exploration (1-2 goals)'
+            ELSE                               'No Activation'
+        END                                      AS activation_tier,
+        CASE WHEN converted = 1
+              AND (goal_scheduling_core    +
+                   goal_schedule_viewed    +
+                   goal_punchclock_used    +
+                   goal_timesheet_approved +
+                   goal_team_comms) = 0
+             THEN 1 ELSE 0 END                   AS converted_without_activation,
+        CASE WHEN (goal_scheduling_core    +
+                   goal_schedule_viewed    +
+                   goal_punchclock_used    +
+                   goal_timesheet_approved +
+                   goal_team_comms) = 5
+              AND converted = 0
+             THEN 1 ELSE 0 END                   AS activated_without_converting
+    FROM mart_trial_goals
+""")
+conn.commit()
+
+cursor.execute("SELECT COUNT(*) FROM mart_trial_activation")
+```
+---
+### EER Diagram
+
+*![EER](https://github.com/Uzo-Hill/Trial-Activation-Conversion-Analysis/blob/main/project_image/EER_Diagram.PNG)*
+
+See the SQL file in the repo for full SQL code including 8 business insight queries
+
+---
+
+## Task 3 — Descriptive Analytics & Product Metrics
+
+- Key Product Metrics
+
+*![product metrics](https://github.com/Uzo-Hill/Trial-Activation-Conversion-Analysis/blob/main/project_image/product_metrics.png)*
+
+---
+
+- Feature Adoption Rate
+
+*![feature adoption](https://github.com/Uzo-Hill/Trial-Activation-Conversion-Analysis/blob/main/project_image/feature_adoption.png)*
+
+- Scheduling is by far the most adopted feature.
+
+- Payroll and Revenue features are severely underutilised, representing a significant onboarding gap.
+---
+
+- Monthly Cohort Performance
+ 
+*![monthly](https://github.com/Uzo-Hill/Trial-Activation-Conversion-Analysis/blob/main/project_image/monthly_trial_volume.png)*
+
+
+---
+
+- Retention Curve
+
+*![engagement drop](https://github.com/Uzo-Hill/Trial-Activation-Conversion-Analysis/blob/main/project_image/Engagement_drop.PNG)*
+
+- Engagement drops sharply after Day 1 — only **38.9%** of organisations show any activity beyond their first day.
+
+- By Day 7, this falls to approximately 28%, and continues declining gradually through to Day 30.
+
+---
+
+### Actionable recommendations
+
+1. Only 39% of organizations have any activity after Day 1. An automated Day-2 nudge targeting inactive organizations could significantly improve trial engagement.
+
+2. Scheduling is the most adopted module  and the strongest engagement signal. Onboarding should guide organizations to create their first 3 shifts quickly.
+
+3. Fully activated organizations (all 5 goals) have the LOWEST conversion rate at 16.2%. Consider a 3-goal threshold as a more predictive activation benchmark.
+
+4. Median conversion happens at Day 30 (trial expiry). A Day-25 prompt reminding organizations of trial expiry could accelerate conversion decisions.
+
+5. Target high-intent non-converters with direct sales outreach.
+
+---
+
+### Limitations
+- Conversion may be influenced by external factors (sales, pricing, timing)
+
+- Event data does not capture user intent directly
+
+-Trial goals are hypotheses, not guaranteed drivers
+
+---
+### Conclusion
+This analysis shows that:
+
+- Engagement matters, but quality > quantity
+
+- Current activation definition is not predictive
+
+- Product improvements should focus on:
+    - Early engagement
+    - Core feature adoption
+    - Better activation metrics
+
+
+---
+## Acknowledgement
+
+This project was completed as part of the Splendor Analytics Data Analyst Community Challenge. The dataset and problem statement were provided by Splendor Analytics.
+
+
+---
+Solution by :
+
+Uzoh C. Hillary
+
+Data Scientist / Data Analyst
 
 
 
