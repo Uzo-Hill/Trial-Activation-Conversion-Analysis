@@ -58,19 +58,43 @@ Raw dataset stats:
 | trial_start     | Trial start date                     |
 | trial_end       | Trial end date                       |
 
+
+[ insert raw data screenshot ]
 ---
-##  Tech Stack & Tools Used
-
-- Python 3.9+ - Primary programming language
-- MySQL - Data model
-- Jupyterlab - Interactive development and analysis
-- **Statistics, Data Processing & Analysis** - Pandas, Numpy, Chi Square.
-- **Machine Learning**: Scikit-learn, Machine learning models - Logistic Regression, RandomForestRegressor
-- Matplotlib, Seaborn - visualization
+##  Setup & Installation
+Prerequisites
+- Python 3.8+ (Pandas, NumPy, Seaborn, Matplotlib)
+- MySQL 8.0+ (Data Modeling)
+- Jupyter Notebook
 
 ---
-## Data Cleaning & Preparation
+## Project Structure
+```
+├── data/
+├── notebooks/
+│   ├── data_cleaning.ipynb
+│   ├── eda_analysis.ipynb
+│   └── product_metrics.ipynb
+├── sql/
+│   ├── trial_goals.sql
+│   └── trial_activation.sql
+├── requirements.txt
+└── README.md
 
+```
+---
+## Task 1 — Data Cleaning, Transformation, EDA & Conversion Driver Analysis
+
+The raw dataset required several cleaning steps and transformation before analysis:
+
+| Data Issue           |Action Taken                       |
+| ---------------------| ------------------------------------ |
+| UPPERCASE column names      | Normalised to lowercase       
+| 67,631 exact duplicate rows (~40%)        | Removed duplicates on org + activity + timestamp             |
+| Datetime columns stored as strings          | Parsed with pd.to_datetime()                     |
+| 136,291 null values in converted_at field           |Validated as expected. Non-converted orgs have no conversion date       |
+| Events outside trial window         | Filtered with ±1 minute tolerance |
+| Created derived features         | days_from_start, trial_length, before_conversion                     |
 
 
 
