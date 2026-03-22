@@ -96,11 +96,26 @@ The raw dataset required several cleaning steps and transformation before analys
 | Events outside trial window         | Filtered with ±1 minute tolerance |
 | Created derived features         | days_from_start, trial_length, before_conversion                     |
 
+After cleaning: 102,895 rows remain across 966 organisations.
 
+```python
+# Remove exact duplicate rows
+df = df.drop_duplicates(subset=["organization_id", "activity_name", "timestamp"])
 
+# Filter events within trial window
+df = df[(df["timestamp"] >= df["trial_start"] - pd.Timedelta("1min")) &
+        (df["timestamp"] <= df["trial_end"]   + pd.Timedelta("1min"))]
 
+# Create derived features:
+# Days since trial start
+df['days_from_start'] = (df['timestamp'] - df['trial_start']).dt.days
 
+# Trial duration
+df['trial_length'] = (df['trial_end'] - df['trial_start']).dt.days
 
-
+# Before/after conversion
+df['before_conversion'] = df['timestamp'] <= df['converted_at']
+```
+📎 See the [python notebook](https://github.com/Uzo-Hill/Trial-Activation-Conversion-Analysis/blob/main/Splendor%20Data%20Challenge%20-%20Trial%20Activation.ipynb) for full cleaning code
 
 
